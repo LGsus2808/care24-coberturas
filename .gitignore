@@ -1,0 +1,5 @@
+﻿CONDICIONES/
+*.pdf
+*.docx
+__pycache__/
+.streamlit/
