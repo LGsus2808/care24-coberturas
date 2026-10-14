@@ -2,3 +2,4 @@
 groq
 python-docx
 pypdf
+gdown
