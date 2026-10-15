@@ -120,10 +120,8 @@ def consultar_groq(prompt_sistema, consulta_usuario):
         try:
             cliente = Groq(api_key=current_key)
             
-            # Obtener modelos activos en la cuenta
             lista_modelos = [m.id for m in cliente.models.list().data]
             
-            # Prioridad de modelos soportados
             preferidos = [
                 "llama-3.3-70b-versatile",
                 "llama-3.1-70b-versatile",
@@ -167,16 +165,18 @@ col_info, col_chat = st.columns([1, 1], gap="medium")
 # --- COLUMNA IZQUIERDA: VISOR DE COBERTURAS ---
 with col_info:
     st.subheader("📋 Documentación de Pólizas")
+    doc_seleccionado = None
     if not base_documentos:
         st.warning("No se encontraron documentos en la carpeta sincronizada.")
     else:
         doc_seleccionado = st.selectbox(
             "Selecciona una póliza para revisar:",
-            options=list(base_documentos.keys())
+            options=list(base_documentos.keys()),
+            key="selector_poliza"
         )
         if doc_seleccionado:
-            st.info(f"Mostrando extracto de: **{doc_seleccionado}**")
-            with st.container(height=520):
+            st.info(f"Póliza activa para consultas: **{doc_seleccionado}**")
+            with st.container(height=560):
                 st.text(base_documentos[doc_seleccionado])
 
 # --- COLUMNA DERECHA: ASISTENTE INTELIGENTE CON IA ---
@@ -192,35 +192,40 @@ with col_chat:
     if "mensajes" not in st.session_state:
         st.session_state.mensajes = []
 
-    # Historial de mensajes
-    with st.container(height=450):
-        for m in st.session_state.mensajes:
-            with st.chat_message(m["role"]):
-                st.markdown(m["content"])
-
     # Entrada de pregunta
-    pregunta = st.chat_input("Escribe tu consulta sobre coberturas o requisitos...")
+    pregunta = st.chat_input("Escribe tu consulta sobre la póliza seleccionada...")
     if pregunta:
+        # Registrar pregunta del usuario
         st.session_state.mensajes.append({"role": "user", "content": pregunta})
-        with st.chat_message("user"):
-            st.markdown(pregunta)
 
-        # Preparar contexto relevante (1,000 caracteres por archivo)
-        contexto_acumulado = ""
-        for nombre, texto in base_documentos.items():
-            contexto_acumulado += f"\n--- DOCUMENTO: {nombre} ---\n{texto[:1000]}\n"
+        # Armar contexto enfocado en la póliza activa
+        if doc_seleccionado and doc_seleccionado in base_documentos:
+            texto_poliza_activa = base_documentos[doc_seleccionado][:5000]
+            contexto_especifico = (
+                f"--- PÓLIZA PRINCIPAL SELECCIONADA POR EL ASESOR: {doc_seleccionado} ---\n"
+                f"{texto_poliza_activa}\n"
+            )
+        else:
+            contexto_especifico = "No hay ninguna póliza seleccionada actualmente."
 
         prompt_sistema = (
-            "Eres el asistente oficial de asesoría de Care24. Tu objetivo es ayudar a los asesores respondiendo "
-            "preguntas sobre coberturas, exclusiones, deducibles, clínicas y condiciones generales de los seguros basándote "
-            "estrictamente en los siguientes documentos:\n\n"
-            f"{contexto_acumulado}\n\n"
-            "Instrucciones: Responde de forma clara, directa, profesional y estructurada. Cita siempre el nombre del plan o "
-            "documento del cual extraes la información. Si la información no se encuentra en los documentos, indícalo explícitamente."
+            "Eres el asistente oficial de asesoría de Care24. Tu objetivo es resolver las consultas de los asesores "
+            "sobre coberturas, servicios, exclusiones, montos y condiciones generales.\n\n"
+            f"El usuario tiene actualmente abierta y seleccionada la siguiente póliza en su pantalla:\n"
+            f"{contexto_especifico}\n\n"
+            "INSTRUCCIONES CLAVE:\n"
+            "1. Asume siempre por defecto que la consulta del usuario se refiere a la póliza seleccionada en pantalla.\n"
+            "2. No preguntes al usuario a qué póliza se refiere salvo que te pida explícitamente comparar con otra.\n"
+            "3. Responde directamente con la lista de servicios, coberturas o límites basándote en el documento proporcionado.\n"
+            "4. Sé claro, directo y profesional."
         )
 
-        with st.chat_message("assistant"):
-            with st.spinner("Analizando coberturas..."):
-                respuesta_ia = consultar_groq(prompt_sistema, pregunta)
-                st.markdown(respuesta_ia)
-                st.session_state.mensajes.append({"role": "assistant", "content": respuesta_ia})
+        with st.spinner(f"Consultando información de {doc_seleccionado}..."):
+            respuesta_ia = consultar_groq(prompt_sistema, pregunta)
+            st.session_state.mensajes.append({"role": "assistant", "content": respuesta_ia})
+        st.rerun()
+
+    # Mostrar mensajes ordenados del más reciente al más antiguo
+    for m in reversed(st.session_state.mensajes):
+        with st.chat_message(m["role"]):
+            st.markdown(m["content"])
