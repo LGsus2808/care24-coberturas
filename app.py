@@ -116,44 +116,26 @@ if not api_keys:
 
 def consultar_groq(prompt_sistema, consulta_usuario):
     ultimo_error = ""
-    for current_key in api_keys:
-        try:
-            cliente = Groq(api_key=current_key)
-            
-            lista_modelos = [m.id for m in cliente.models.list().data]
-            
-            preferidos = [
-                "llama-3.3-70b-versatile",
-                "llama-3.1-70b-versatile",
-                "llama-3.1-8b-instant",
-                "llama-3.2-3b-preview",
-                "llama-3.2-1b-preview",
-                "mixtral-8x7b-32768"
-            ]
-            
-            modelo_elegido = None
-            for pref in preferidos:
-                if pref in lista_modelos:
-                    modelo_elegido = pref
-                    break
-                    
-            if not modelo_elegido and lista_modelos:
-                modelo_elegido = lista_modelos[0]
+    modelos_a_probar = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
-            respuesta = cliente.chat.completions.create(
-                model=modelo_elegido,
-                messages=[
-                    {"role": "system", "content": prompt_sistema},
-                    {"role": "user", "content": consulta_usuario}
-                ],
-                temperature=0.2,
-                max_tokens=1000
-            )
-            return respuesta.choices[0].message.content
-        except Exception as e:
-            ultimo_error = str(e)
-            continue
-            
+    for current_key in api_keys:
+        cliente = Groq(api_key=current_key)
+        for modelo in modelos_a_probar:
+            try:
+                respuesta = cliente.chat.completions.create(
+                    model=modelo,
+                    messages=[
+                        {"role": "system", "content": prompt_sistema},
+                        {"role": "user", "content": consulta_usuario}
+                    ],
+                    temperature=0.2,
+                    max_tokens=1500
+                )
+                return respuesta.choices[0].message.content
+            except Exception as e:
+                ultimo_error = str(e)
+                continue
+                
     return f"❌ Detalle técnico del error de Groq:\n\n`{ultimo_error}`"
 
 # ---------------------------------------------------------
@@ -195,37 +177,36 @@ with col_chat:
     # Entrada de pregunta
     pregunta = st.chat_input("Escribe tu consulta sobre la póliza seleccionada...")
     if pregunta:
-        # Registrar pregunta del usuario
         st.session_state.mensajes.append({"role": "user", "content": pregunta})
 
-        # Armar contexto enfocado en la póliza activa
+        # Extraer hasta 6,000 caracteres de la póliza activa
         if doc_seleccionado and doc_seleccionado in base_documentos:
-            texto_poliza_activa = base_documentos[doc_seleccionado][:5000]
+            texto_poliza_activa = base_documentos[doc_seleccionado][:6000]
             contexto_especifico = (
-                f"--- PÓLIZA PRINCIPAL SELECCIONADA POR EL ASESOR: {doc_seleccionado} ---\n"
+                f"--- DOCUMENTO ACTIVO: {doc_seleccionado} ---\n"
                 f"{texto_poliza_activa}\n"
             )
         else:
-            contexto_especifico = "No hay ninguna póliza seleccionada actualmente."
+            contexto_especifico = "No hay póliza seleccionada."
 
         prompt_sistema = (
-            "Eres el asistente oficial de asesoría de Care24. Tu objetivo es resolver las consultas de los asesores "
-            "sobre coberturas, servicios, exclusiones, montos y condiciones generales.\n\n"
-            f"El usuario tiene actualmente abierta y seleccionada la siguiente póliza en su pantalla:\n"
-            f"{contexto_especifico}\n\n"
-            "INSTRUCCIONES CLAVE:\n"
-            "1. Asume siempre por defecto que la consulta del usuario se refiere a la póliza seleccionada en pantalla.\n"
-            "2. No preguntes al usuario a qué póliza se refiere salvo que te pida explícitamente comparar con otra.\n"
-            "3. Responde directamente con la lista de servicios, coberturas o límites basándote en el documento proporcionado.\n"
-            "4. Sé claro, directo y profesional."
+            "Eres el asistente oficial de asesoría de Care24. Tu objetivo es resolver dudas de los asesores "
+            "sobre coberturas, servicios, copagos, límites de eventos, deducibles y exclusiones.\n\n"
+            f"El asesor tiene abierta en su pantalla la siguiente póliza:\n{contexto_especifico}\n\n"
+            "REGLAS OBLIGATORIAS DE RESPUESTA:\n"
+            "1. Responde basándote ÚNICAMENTE en la póliza activa seleccionada.\n"
+            "2. Cuando te pidan servicios, copagos, exámenes o eventos, presenta la información en una TABLA MARKDOWN "
+            "con columnas bien delimitadas con saltos de línea (por ejemplo: | Servicio | Copago | Eventos / Límite | Detalle |).\n"
+            "3. No devuelvas tablas comprimidas en una sola línea.\n"
+            "4. Sé preciso con montos en Soles (S/.) o Dólares, límites anuales y restricciones."
         )
 
-        with st.spinner(f"Consultando información de {doc_seleccionado}..."):
+        with st.spinner(f"Analizando {doc_seleccionado}..."):
             respuesta_ia = consultar_groq(prompt_sistema, pregunta)
             st.session_state.mensajes.append({"role": "assistant", "content": respuesta_ia})
         st.rerun()
 
-    # Mostrar mensajes ordenados del más reciente al más antiguo
+    # Historial de mensajes ordenado: del más reciente al más antiguo
     for m in reversed(st.session_state.mensajes):
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
