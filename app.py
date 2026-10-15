@@ -17,11 +17,21 @@ st.set_page_config(
 )
 
 # ---------------------------------------------------------
-# CONSTANTES Y CONFIGURACIÓN
+# CONSTANTES Y CONFIGURACIÓN PROTEGIDA (SECRETS)
 # ---------------------------------------------------------
-PASSWORD_CORRECTA = "Asesor2026"
-DRIVE_FOLDER_ID = "1oHbjy3u0FSb0ctBhu2p8HPv1ubeO9_J5"
 CARPETA_CONDICIONES = "CONDICIONES"
+
+# Validación de Secrets requeridos
+if "ADMIN_PASSWORD" not in st.secrets:
+    st.error("⚠️ Falta configurar 'ADMIN_PASSWORD' en Settings > Secrets de Streamlit.")
+    st.stop()
+
+if "DRIVE_FOLDER_ID" not in st.secrets:
+    st.error("⚠️ Falta configurar 'DRIVE_FOLDER_ID' en Settings > Secrets de Streamlit.")
+    st.stop()
+
+PASSWORD_CORRECTA = st.secrets["ADMIN_PASSWORD"]
+DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
 
 # ---------------------------------------------------------
 # SEGURIDAD: CONTROL DE ACCESO
@@ -123,7 +133,7 @@ def consultar_groq(prompt_sistema, consulta_usuario):
 
             modelos_disponibles = [m.id for m in cliente.models.list().data]
 
-            # Excluir modelos de audio, visión, moderación y modelos ultraligeros propensos a bucles
+            # Excluir modelos no textuales o ultraligeros
             modelos_validos = [
                 m for m in modelos_disponibles
                 if "whisper" not in m.lower()
@@ -151,7 +161,7 @@ def consultar_groq(prompt_sistema, consulta_usuario):
                 modelo_a_usar = modelos_validos[0]
 
             if not modelo_a_usar:
-                raise Exception("No hay modelos de texto analíticos disponibles en la cuenta.")
+                raise Exception("No hay modelos de razonamiento disponibles en la cuenta.")
 
             respuesta = cliente.chat.completions.create(
                 model=modelo_a_usar,
@@ -211,7 +221,7 @@ with col_chat:
     if pregunta:
         st.session_state.mensajes.append({"role": "user", "content": pregunta})
 
-        # Hasta 25,000 caracteres de la póliza activa para incluir tablas finales y anexos
+        # Hasta 25,000 caracteres de la póliza activa
         if doc_seleccionado and doc_seleccionado in base_documentos:
             texto_poliza_activa = base_documentos[doc_seleccionado][:25000]
             contexto_especifico = (
