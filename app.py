@@ -119,8 +119,31 @@ def consultar_groq(prompt_sistema, consulta_usuario):
     for current_key in api_keys:
         try:
             cliente = Groq(api_key=current_key)
+            
+            # Obtener modelos activos en la cuenta
+            lista_modelos = [m.id for m in cliente.models.list().data]
+            
+            # Prioridad de modelos soportados
+            preferidos = [
+                "llama-3.3-70b-versatile",
+                "llama-3.1-70b-versatile",
+                "llama-3.1-8b-instant",
+                "llama-3.2-3b-preview",
+                "llama-3.2-1b-preview",
+                "mixtral-8x7b-32768"
+            ]
+            
+            modelo_elegido = None
+            for pref in preferidos:
+                if pref in lista_modelos:
+                    modelo_elegido = pref
+                    break
+                    
+            if not modelo_elegido and lista_modelos:
+                modelo_elegido = lista_modelos[0]
+
             respuesta = cliente.chat.completions.create(
-                model="llama3-70b-8192",
+                model=modelo_elegido,
                 messages=[
                     {"role": "system", "content": prompt_sistema},
                     {"role": "user", "content": consulta_usuario}
@@ -182,7 +205,7 @@ with col_chat:
         with st.chat_message("user"):
             st.markdown(pregunta)
 
-        # Preparar contexto relevante (1,000 caracteres por archivo para no saturar TPM)
+        # Preparar contexto relevante (1,000 caracteres por archivo)
         contexto_acumulado = ""
         for nombre, texto in base_documentos.items():
             contexto_acumulado += f"\n--- DOCUMENTO: {nombre} ---\n{texto[:1000]}\n"
