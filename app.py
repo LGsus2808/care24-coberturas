@@ -99,7 +99,7 @@ def cargar_base_conocimiento():
 base_documentos = cargar_base_conocimiento()
 
 # ---------------------------------------------------------
-# GESTIÓN Y ROTACIÓN DE CLAVES DE GROQ
+# GESTIÓN Y ROTACIÓN DE CLAVES DE GROQ (CON AUTO-SELECCIÓN)
 # ---------------------------------------------------------
 def obtener_claves_groq():
     if "GROQ_API_KEYS" in st.secrets:
@@ -116,26 +116,62 @@ if not api_keys:
 
 def consultar_groq(prompt_sistema, consulta_usuario):
     ultimo_error = ""
-    modelos_a_probar = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
     for current_key in api_keys:
-        cliente = Groq(api_key=current_key)
-        for modelo in modelos_a_probar:
-            try:
-                respuesta = cliente.chat.completions.create(
-                    model=modelo,
-                    messages=[
-                        {"role": "system", "content": prompt_sistema},
-                        {"role": "user", "content": consulta_usuario}
-                    ],
-                    temperature=0.2,
-                    max_tokens=1500
-                )
-                return respuesta.choices[0].message.content
-            except Exception as e:
-                ultimo_error = str(e)
-                continue
-                
+        try:
+            cliente = Groq(api_key=current_key.strip())
+
+            # 1. Obtener la lista de modelos activos en esta cuenta
+            modelos_disponibles = [m.id for m in cliente.models.list().data]
+
+            # 2. Descartar modelos que no sean de texto (audio, visión, moderación, etc.)
+            modelos_validos = [
+                m for m in modelos_disponibles
+                if "whisper" not in m.lower()
+                and "orpheus" not in m.lower()
+                and "vision" not in m.lower()
+                and "guard" not in m.lower()
+            ]
+
+            # 3. Elegir el mejor modelo disponible por orden de prioridad
+            modelo_a_usar = None
+            prioridades = [
+                "llama-3.3-70b-versatile",
+                "llama-3.2-3b-preview",
+                "llama-3.2-1b-preview",
+                "qwen-2.5-32b",
+                "mistral-saba-24b",
+                "gemma2-9b-it"
+            ]
+
+            for cand in prioridades:
+                if cand in modelos_validos:
+                    modelo_a_usar = cand
+                    break
+
+            # Si ninguno de los prioritarios está, usar el primer modelo de texto activo
+            if not modelo_a_usar and modelos_validos:
+                modelo_a_usar = modelos_validos[0]
+
+            if not modelo_a_usar:
+                raise Exception(f"No hay modelos de chat disponibles en la cuenta. Modelos: {modelos_disponibles}")
+
+            # 4. Realizar la consulta a la API
+            respuesta = cliente.chat.completions.create(
+                model=modelo_a_usar,
+                messages=[
+                    {"role": "system", "content": prompt_sistema},
+                    {"role": "user", "content": consulta_usuario}
+                ],
+                temperature=0.2,
+                max_tokens=1500
+            )
+            return respuesta.choices[0].message.content
+
+        except Exception as e:
+            ultimo_error = str(e)
+            continue
+
     return f"❌ Detalle técnico del error de Groq:\n\n`{ultimo_error}`"
 
 # ---------------------------------------------------------
@@ -179,7 +215,7 @@ with col_chat:
     if pregunta:
         st.session_state.mensajes.append({"role": "user", "content": pregunta})
 
-        # Extraer hasta 6,000 caracteres de la póliza activa
+        # Extraer texto de la póliza seleccionada para el contexto
         if doc_seleccionado and doc_seleccionado in base_documentos:
             texto_poliza_activa = base_documentos[doc_seleccionado][:6000]
             contexto_especifico = (
@@ -196,8 +232,8 @@ with col_chat:
             "REGLAS OBLIGATORIAS DE RESPUESTA:\n"
             "1. Responde basándote ÚNICAMENTE en la póliza activa seleccionada.\n"
             "2. Cuando te pidan servicios, copagos, exámenes o eventos, presenta la información en una TABLA MARKDOWN "
-            "con columnas bien delimitadas con saltos de línea (por ejemplo: | Servicio | Copago | Eventos / Límite | Detalle |).\n"
-            "3. No devuelvas tablas comprimidas en una sola línea.\n"
+            "con columnas bien delimitadas y saltos de línea (por ejemplo: | Servicio | Copago | Eventos / Límite | Detalle |).\n"
+            "3. No comprimas tablas en una sola línea.\n"
             "4. Sé preciso con montos en Soles (S/.) o Dólares, límites anuales y restricciones."
         )
 
@@ -206,7 +242,7 @@ with col_chat:
             st.session_state.mensajes.append({"role": "assistant", "content": respuesta_ia})
         st.rerun()
 
-    # Historial de mensajes ordenado: del más reciente al más antiguo
+    # Historial de mensajes: del más reciente al más antiguo
     for m in reversed(st.session_state.mensajes):
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
