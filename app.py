@@ -55,7 +55,6 @@ def sincronizar_documentos():
     os.makedirs(CARPETA_CONDICIONES, exist_ok=True)
     archivos = os.listdir(CARPETA_CONDICIONES)
     
-    # Si la carpeta está vacía o no tiene archivos soportados, descargamos de Drive
     archivos_validos = [f for f in archivos if f.lower().endswith(('.pdf', '.docx', '.txt'))]
     if not archivos_validos:
         url_drive = f"https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID}"
@@ -103,11 +102,10 @@ base_documentos = cargar_base_conocimiento()
 # GESTIÓN Y ROTACIÓN DE CLAVES DE GROQ
 # ---------------------------------------------------------
 def obtener_claves_groq():
-    # Intenta obtenerlas de st.secrets primero
     if "GROQ_API_KEYS" in st.secrets:
-        return list(st.secrets["GROQ_API_KEYS"])
+        return [k.strip() for k in st.secrets["GROQ_API_KEYS"] if k.strip()]
     elif "GROQ_API_KEY" in st.secrets:
-        return [st.secrets["GROQ_API_KEY"]]
+        return [st.secrets["GROQ_API_KEY"].strip()]
     return []
 
 api_keys = obtener_claves_groq()
@@ -116,13 +114,9 @@ if not api_keys:
     st.error("⚠️ No se encontraron las claves de Groq en los Secrets de Streamlit. Agrégalas en Settings > Secrets.")
     st.stop()
 
-if "key_cycler" not in st.session_state:
-    st.session_state.key_cycler = itertools.cycle(api_keys)
-
 def consultar_groq(prompt_sistema, consulta_usuario):
-    intentos = len(api_keys)
-    while intentos > 0:
-        current_key = next(st.session_state.key_cycler)
+    ultimo_error = ""
+    for current_key in api_keys:
         try:
             cliente = Groq(api_key=current_key)
             respuesta = cliente.chat.completions.create(
@@ -132,12 +126,14 @@ def consultar_groq(prompt_sistema, consulta_usuario):
                     {"role": "user", "content": consulta_usuario}
                 ],
                 temperature=0.2,
-                max_tokens=1500
+                max_tokens=1000
             )
             return respuesta.choices[0].message.content
-        except Exception:
-            intentos -= 1
-    return "❌ Error: Todas las claves de Groq alcanzaron su límite temporal de cuota. Por favor, reintenta en unos instantes."
+        except Exception as e:
+            ultimo_error = str(e)
+            continue
+            
+    return f"❌ Detalle técnico del error de Groq:\n\n`{ultimo_error}`"
 
 # ---------------------------------------------------------
 # INTERFAZ SPLIT-VIEW (DOS COLUMNAS)
@@ -182,12 +178,11 @@ with col_chat:
     # Entrada de pregunta
     pregunta = st.chat_input("Escribe tu consulta sobre coberturas o requisitos...")
     if pregunta:
-        # Registrar y mostrar mensaje de usuario
         st.session_state.mensajes.append({"role": "user", "content": pregunta})
         with st.chat_message("user"):
             st.markdown(pregunta)
 
-        # Preparar contexto relevante
+        # Preparar contexto relevante (1,000 caracteres por archivo para no saturar TPM)
         contexto_acumulado = ""
         for nombre, texto in base_documentos.items():
             contexto_acumulado += f"\n--- DOCUMENTO: {nombre} ---\n{texto[:1000]}\n"
