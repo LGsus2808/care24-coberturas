@@ -190,7 +190,7 @@ with col_chat:
         # Preparar contexto relevante
         contexto_acumulado = ""
         for nombre, texto in base_documentos.items():
-            contexto_acumulado += f"\n--- DOCUMENTO: {nombre} ---\n{texto[:3000]}\n"
+            contexto_acumulado += f"\n--- DOCUMENTO: {nombre} ---\n{texto[:1000]}\n"
 
         prompt_sistema = (
             "Eres el asistente oficial de asesoría de Care24. Tu objetivo es ayudar a los asesores respondiendo "
