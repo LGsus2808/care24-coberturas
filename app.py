@@ -149,7 +149,6 @@ def consultar_groq(prompt_sistema, consulta_usuario):
                     modelo_a_usar = cand
                     break
 
-            # Si ninguno de los prioritarios está, usar el primer modelo de texto activo
             if not modelo_a_usar and modelos_validos:
                 modelo_a_usar = modelos_validos[0]
 
@@ -201,9 +200,9 @@ with col_info:
 with col_chat:
     c_head1, c_head2 = st.columns([3, 1])
     with c_head1:
-        st.subheader("💬 Consulta a la IA")
+        st.subheader("💬 Consulta a la IA")[cite: 2]
     with c_head2:
-        if st.button("Limpiar chat"):
+        if st.button("Limpiar chat"):[cite: 2]
             st.session_state.mensajes = []
             st.rerun()
 
@@ -211,7 +210,7 @@ with col_chat:
         st.session_state.mensajes = []
 
     # Entrada de pregunta
-    pregunta = st.chat_input("Escribe tu consulta sobre la póliza seleccionada...")
+    pregunta = st.chat_input("Escribe tu consulta sobre la póliza seleccionada...")[cite: 2]
     if pregunta:
         st.session_state.mensajes.append({"role": "user", "content": pregunta})
 
@@ -242,7 +241,23 @@ with col_chat:
             st.session_state.mensajes.append({"role": "assistant", "content": respuesta_ia})
         st.rerun()
 
-    # Historial de mensajes: del más reciente al más antiguo
-    for m in reversed(st.session_state.mensajes):
-        with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+    # Agrupar mensajes en pares (pregunta + respuesta) para ordenarlos de más reciente a más antiguo
+    pares_conversacion = []
+    lista = st.session_state.mensajes
+    i = 0
+    while i < len(lista):
+        if i + 1 < len(lista) and lista[i]["role"] == "user" and lista[i+1]["role"] == "assistant":
+            pares_conversacion.append((lista[i], lista[i+1]))
+            i += 2
+        else:
+            pares_conversacion.append((lista[i], None))
+            i += 1
+
+    # Renderizar los pares de conversación (más reciente arriba, pero pregunta primero y respuesta después)
+    for user_msg, bot_msg in reversed(pares_conversacion):
+        with st.chat_message(user_msg["role"]):
+            st.markdown(user_msg["content"])
+        if bot_msg:
+            with st.chat_message(bot_msg["role"]):
+                st.markdown(bot_msg["content"])
+        st.divider()
