@@ -1,6 +1,7 @@
 ﻿import os
 import glob
 import itertools
+import shutil
 import streamlit as st
 import gdown
 from groq import Groq
@@ -56,6 +57,26 @@ def login():
 if not st.session_state.autenticado:
     login()
     st.stop()
+
+# ---------------------------------------------------------
+# BARRA LATERAL: PANEL DE GESTIÓN Y SINCRONIZACIÓN
+# ---------------------------------------------------------
+with st.sidebar:
+    st.title("⚙️ Configuración")
+    st.markdown("Administra la base de pólizas sincronizadas desde Google Drive.")
+    
+    if st.button("🔄 Sincronizar / Actualizar Pólizas", use_container_width=True):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        if os.path.exists(CARPETA_CONDICIONES):
+            shutil.rmtree(CARPETA_CONDICIONES)
+        st.success("Caché limpiada. Descargando versiones actualizadas...")
+        st.rerun()
+
+    st.divider()
+    if st.button("Cerrar Sesión", use_container_width=True):
+        st.session_state.autenticado = False
+        st.rerun()
 
 # ---------------------------------------------------------
 # DESCARGA AUTOMÁTICA DE DOCUMENTOS DESDE GOOGLE DRIVE
