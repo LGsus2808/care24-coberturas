@@ -34,7 +34,7 @@ def login():
     st.markdown("Por favor, introduce tu contraseña de asesor para continuar.")
     
     with st.form("form_login"):
-        clave = st.input("Contraseña:", type="password")
+        clave = st.text_input("Contraseña:", type="password")
         submit = st.form_submit_button("Ingresar")
         if submit:
             if clave == PASSWORD_CORRECTA:
