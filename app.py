@@ -200,9 +200,9 @@ with col_info:
 with col_chat:
     c_head1, c_head2 = st.columns([3, 1])
     with c_head1:
-        st.subheader("💬 Consulta a la IA")[cite: 2]
+        st.subheader("💬 Consulta a la IA")
     with c_head2:
-        if st.button("Limpiar chat"):[cite: 2]
+        if st.button("Limpiar chat"):
             st.session_state.mensajes = []
             st.rerun()
 
@@ -210,7 +210,7 @@ with col_chat:
         st.session_state.mensajes = []
 
     # Entrada de pregunta
-    pregunta = st.chat_input("Escribe tu consulta sobre la póliza seleccionada...")[cite: 2]
+    pregunta = st.chat_input("Escribe tu consulta sobre la póliza seleccionada...")
     if pregunta:
         st.session_state.mensajes.append({"role": "user", "content": pregunta})
 
