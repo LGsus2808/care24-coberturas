@@ -121,29 +121,27 @@ def consultar_groq(prompt_sistema, consulta_usuario):
         try:
             cliente = Groq(api_key=current_key.strip())
 
-            # 1. Obtener la lista de modelos activos en esta cuenta
             modelos_disponibles = [m.id for m in cliente.models.list().data]
 
-            # 2. Descartar modelos que no sean de texto (audio, visión, moderación, etc.)
+            # Excluir modelos de audio, visión, moderación y modelos ultraligeros propensos a bucles
             modelos_validos = [
                 m for m in modelos_disponibles
                 if "whisper" not in m.lower()
                 and "orpheus" not in m.lower()
                 and "vision" not in m.lower()
                 and "guard" not in m.lower()
+                and "1b" not in m.lower()
             ]
 
-            # 3. Elegir el mejor modelo disponible por orden de prioridad
-            modelo_a_usar = None
             prioridades = [
                 "llama-3.3-70b-versatile",
-                "llama-3.2-3b-preview",
-                "llama-3.2-1b-preview",
+                "llama3-70b-8192",
                 "qwen-2.5-32b",
                 "mistral-saba-24b",
-                "gemma2-9b-it"
+                "llama-3.2-3b-preview"
             ]
 
+            modelo_a_usar = None
             for cand in prioridades:
                 if cand in modelos_validos:
                     modelo_a_usar = cand
@@ -153,16 +151,15 @@ def consultar_groq(prompt_sistema, consulta_usuario):
                 modelo_a_usar = modelos_validos[0]
 
             if not modelo_a_usar:
-                raise Exception(f"No hay modelos de chat disponibles en la cuenta. Modelos: {modelos_disponibles}")
+                raise Exception("No hay modelos de texto analíticos disponibles en la cuenta.")
 
-            # 4. Realizar la consulta a la API
             respuesta = cliente.chat.completions.create(
                 model=modelo_a_usar,
                 messages=[
                     {"role": "system", "content": prompt_sistema},
                     {"role": "user", "content": consulta_usuario}
                 ],
-                temperature=0.2,
+                temperature=0.1,
                 max_tokens=1500
             )
             return respuesta.choices[0].message.content
@@ -214,9 +211,9 @@ with col_chat:
     if pregunta:
         st.session_state.mensajes.append({"role": "user", "content": pregunta})
 
-        # Extraer texto de la póliza seleccionada para el contexto
+        # Hasta 25,000 caracteres de la póliza activa para incluir tablas finales y anexos
         if doc_seleccionado and doc_seleccionado in base_documentos:
-            texto_poliza_activa = base_documentos[doc_seleccionado][:6000]
+            texto_poliza_activa = base_documentos[doc_seleccionado][:25000]
             contexto_especifico = (
                 f"--- DOCUMENTO ACTIVO: {doc_seleccionado} ---\n"
                 f"{texto_poliza_activa}\n"
@@ -225,15 +222,17 @@ with col_chat:
             contexto_especifico = "No hay póliza seleccionada."
 
         prompt_sistema = (
-            "Eres el asistente oficial de asesoría de Care24. Tu objetivo es resolver dudas de los asesores "
-            "sobre coberturas, servicios, copagos, límites de eventos, deducibles y exclusiones.\n\n"
-            f"El asesor tiene abierta en su pantalla la siguiente póliza:\n{contexto_especifico}\n\n"
-            "REGLAS OBLIGATORIAS DE RESPUESTA:\n"
+            "Eres el asistente especializado de Care24 para asesores de seguros. Tu tarea es extraer "
+            "y resumir con total exactitud y rigor la información técnica de la póliza proporcionada.\n\n"
+            f"DOCUMENTO ADJUNTO:\n{contexto_especifico}\n\n"
+            "DIRECTIVAS ESTRICTAS:\n"
             "1. Responde basándote ÚNICAMENTE en la póliza activa seleccionada.\n"
-            "2. Cuando te pidan servicios, copagos, exámenes o eventos, presenta la información en una TABLA MARKDOWN "
-            "con columnas bien delimitadas y saltos de línea (por ejemplo: | Servicio | Copago | Eventos / Límite | Detalle |).\n"
-            "3. No comprimas tablas en una sola línea.\n"
-            "4. Sé preciso con montos en Soles (S/.) o Dólares, límites anuales y restricciones."
+            "2. Responde de forma directa, concisa y profesional. Prohibido saludar o repetir fórmulas de cortesía.\n"
+            "3. Prohibido enumerar páginas sin contenido útil o generar frases en bucle.\n"
+            "4. Cuando te pidan servicios, copagos, exámenes o eventos, presenta la información en una TABLA MARKDOWN "
+            "con columnas delimitadas y saltos de línea (por ejemplo: | Servicio | Copago | Eventos / Límite | Detalle |).\n"
+            "5. Sé preciso con montos en Soles (S/.) o Dólares, límites anuales y restricciones.\n"
+            "6. Si un dato no figura explícitamente en el texto, indícalo claramente: 'El documento no especifica...' en vez de suponer."
         )
 
         with st.spinner(f"Analizando {doc_seleccionado}..."):
@@ -241,7 +240,7 @@ with col_chat:
             st.session_state.mensajes.append({"role": "assistant", "content": respuesta_ia})
         st.rerun()
 
-    # Agrupar mensajes en pares (pregunta + respuesta) para ordenarlos de más reciente a más antiguo
+    # Agrupar mensajes en pares (pregunta + respuesta)
     pares_conversacion = []
     lista = st.session_state.mensajes
     i = 0
@@ -253,7 +252,7 @@ with col_chat:
             pares_conversacion.append((lista[i], None))
             i += 1
 
-    # Renderizar los pares de conversación (más reciente arriba, pero pregunta primero y respuesta después)
+    # Renderizar pares ordenados de más reciente a más antiguo
     for user_msg, bot_msg in reversed(pares_conversacion):
         with st.chat_message(user_msg["role"]):
             st.markdown(user_msg["content"])
