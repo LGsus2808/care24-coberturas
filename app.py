@@ -120,7 +120,7 @@ def consultar_groq(prompt_sistema, consulta_usuario):
         try:
             cliente = Groq(api_key=current_key)
             respuesta = cliente.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model="llama3-70b-8192",
                 messages=[
                     {"role": "system", "content": prompt_sistema},
                     {"role": "user", "content": consulta_usuario}
