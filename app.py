@@ -1,344 +1,410 @@
 ﻿import os
-import glob
-import itertools
 import shutil
+import json
+import itertools
+import requests
+import pandas as pd
 import streamlit as st
 import gdown
 from groq import Groq
-import docx
-import pypdf
 
 # ---------------------------------------------------------
 # CONFIGURACIÓN DE PÁGINA
 # ---------------------------------------------------------
 st.set_page_config(
-    page_title="Care24 - Portal de Coberturas",
+    page_title="Care24 - Consulta de Coberturas",
     page_icon="🛡️",
     layout="wide"
 )
 
 # ---------------------------------------------------------
-# CONSTANTES Y CONFIGURACIÓN PROTEGIDA (SECRETS)
+# VARIABLES DE CONFIGURACIÓN Y SECRETS
 # ---------------------------------------------------------
 CARPETA_CONDICIONES = "CONDICIONES"
+DRIVE_FOLDER_ID = st.secrets.get("DRIVE_FOLDER_ID", "")
+APPS_SCRIPT_URL = st.secrets.get("APPS_SCRIPT_URL", "")
+USUARIOS_SHEET_ID = st.secrets.get("USUARIOS_SHEET_ID", "")
+URL_SHEET_CSV = f"https://docs.google.com/spreadsheets/d/{USUARIOS_SHEET_ID}/export?format=csv"
 
-# Validación de Secrets requeridos
-if "ADMIN_PASSWORD" not in st.secrets:
-    st.error("⚠️ Falta configurar 'ADMIN_PASSWORD' en Settings > Secrets de Streamlit.")
-    st.stop()
-
-if "DRIVE_FOLDER_ID" not in st.secrets:
-    st.error("⚠️ Falta configurar 'DRIVE_FOLDER_ID' en Settings > Secrets de Streamlit.")
-    st.stop()
-
-PASSWORD_CORRECTA = st.secrets["ADMIN_PASSWORD"]
-DRIVE_FOLDER_ID = st.secrets["DRIVE_FOLDER_ID"]
+# Configuración de pool de claves Groq
+GROQ_KEYS = st.secrets.get("GROQ_API_KEYS", [])
+if isinstance(GROQ_KEYS, str):
+    GROQ_KEYS = [GROQ_KEYS]
+pool_keys = itertools.cycle(GROQ_KEYS) if GROQ_KEYS else None
 
 # ---------------------------------------------------------
-# SEGURIDAD: CONTROL DE ACCESO
+# GESTIÓN DE SESIÓN
 # ---------------------------------------------------------
 if "autenticado" not in st.session_state:
     st.session_state.autenticado = False
+if "usuario_info" not in st.session_state:
+    st.session_state.usuario_info = {}
+if "historial_chat" not in st.session_state:
+    st.session_state.historial_chat = []
+if "modo_vista" not in st.session_state:
+    st.session_state.modo_vista = "chat"
 
+# ---------------------------------------------------------
+# SINCRONIZACIÓN DE ARCHIVOS DESDE DRIVE
+# ---------------------------------------------------------
+def sincronizar_documentos():
+    """Descarga o actualiza las carpetas de condicionados desde Google Drive."""
+    if not os.path.exists(CARPETA_CONDICIONES) or not os.listdir(CARPETA_CONDICIONES):
+        if DRIVE_FOLDER_ID:
+            with st.spinner("Sincronizando coberturas desde Google Drive..."):
+                try:
+                    url = f"https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID}"
+                    gdown.download_folder(url, output=CARPETA_CONDICIONES, quiet=True, use_cookies=False)
+                except Exception as e:
+                    st.error(f"Error al descargar archivos desde Drive: {e}")
+        else:
+            st.warning("DRIVE_FOLDER_ID no configurado en st.secrets.")
+
+# ---------------------------------------------------------
+# CONEXIÓN CON GOOGLE SHEETS Y APPS SCRIPT
+# ---------------------------------------------------------
+@st.cache_data(ttl=30)
+def obtener_base_usuarios():
+    """Descarga los datos actualizados de usuarios desde Google Sheets."""
+    try:
+        df = pd.read_csv(URL_SHEET_CSV)
+        df["USUARIO"] = df["USUARIO"].astype(str).str.strip().str.lower()
+        df["PASSWORD"] = df["PASSWORD"].astype(str).str.strip()
+        df["ROL"] = df["ROL"].astype(str).str.strip().str.upper()
+        df["ESTADO"] = df["ESTADO"].astype(str).str.strip().str.upper()
+        df["CORREO"] = df["CORREO"].astype(str).str.strip().str.lower()
+        df["NOMBRE_APELLIDO"] = df["NOMBRE_APELLIDO"].astype(str).str.strip()
+        return df
+    except Exception as e:
+        st.error(f"Error al leer base de datos de usuarios: {e}")
+        return pd.DataFrame()
+
+def enviar_peticion_apps_script(payload):
+    """Envía peticiones POST al backend en Google Apps Script."""
+    try:
+        resp = requests.post(APPS_SCRIPT_URL, json=payload, timeout=15)
+        return resp.json()
+    except Exception as e:
+        return {"status": "error", "msg": f"Fallo de conexión: {e}"}
+
+# ---------------------------------------------------------
+# PANTALLA DE AUTENTICACIÓN Y RECUPERACIÓN
+# ---------------------------------------------------------
 def login():
-    st.title("🛡️ Care24 - Acceso Seguro al Portal")
-    st.markdown("Por favor, introduce tu contraseña de asesor para continuar.")
+    st.title("🛡️ Care24 - Consulta de Coberturas")
+    st.subheader("Acceso al Portal")
     
-    with st.form("form_login"):
-        clave = st.text_input("Contraseña:", type="password")
-        submit = st.form_submit_button("Ingresar")
-        if submit:
-            if clave == PASSWORD_CORRECTA:
-                st.session_state.autenticado = True
-                st.rerun()
-            else:
-                st.error("❌ Contraseña incorrecta. Inténtalo nuevamente.")
+    tab_login, tab_recuperar = st.tabs(["🔑 Iniciar Sesión", "📩 Olvidé mi Contraseña"])
 
+    with tab_login:
+        with st.form("form_login"):
+            usuario_in = st.text_input("Usuario:").strip().lower()
+            password_in = st.text_input("Contraseña:", type="password").strip()
+            boton_ingreso = st.form_submit_button("Ingresar", use_container_width=True)
+
+            if boton_ingreso:
+                if not usuario_in or not password_in:
+                    st.warning("Por favor completa todos los campos.")
+                else:
+                    df_u = obtener_base_usuarios()
+                    user_match = df_u[df_u["USUARIO"] == usuario_in]
+
+                    if user_match.empty:
+                        st.error("❌ Usuario o contraseña incorrectos.")
+                    else:
+                        datos = user_match.iloc[0]
+                        if datos["ESTADO"] != "ACTIVO":
+                            st.error("⛔ Tu cuenta se encuentra deshabilitada. Contacta al administrador.")
+                        elif datos["PASSWORD"] == password_in:
+                            st.session_state.autenticado = True
+                            st.session_state.usuario_info = {
+                                "usuario": datos["USUARIO"],
+                                "nombre": datos["NOMBRE_APELLIDO"],
+                                "correo": datos["CORREO"],
+                                "rol": datos["ROL"]
+                            }
+                            st.success(f"Bienvenido, {datos['NOMBRE_APELLIDO']}")
+                            st.rerun()
+                        else:
+                            st.error("❌ Usuario o contraseña incorrectos.")
+
+    with tab_recuperar:
+        st.markdown("#### Restablecer Contraseña")
+        st.write("Recibirás un código de 6 dígitos en tu correo corporativo.")
+        
+        correo_recup = st.text_input("Ingresa tu correo registrado:").strip().lower()
+        if st.button("Enviar Código de Verificación"):
+            if correo_recup:
+                with st.spinner("Generando y enviando código..."):
+                    res = enviar_peticion_apps_script({
+                        "accion": "solicitar_codigo",
+                        "correo": correo_recup
+                    })
+                    if res.get("status") == "ok":
+                        st.success("✅ Código enviado a tu correo corporativo. Revisa tu bandeja de entrada o spam.")
+                    else:
+                        st.error(f"❌ {res.get('msg', 'Error al procesar solicitud')}")
+            else:
+                st.warning("Escribe tu correo electrónico.")
+
+        st.divider()
+        st.markdown("#### Confirmar Código y Nueva Contraseña")
+        with st.form("form_cambio_clave"):
+            codigo_in = st.text_input("Código de 6 dígitos:").strip()
+            nueva_clave = st.text_input("Nueva contraseña:", type="password").strip()
+            confirmar_clave = st.text_input("Confirmar nueva contraseña:", type="password").strip()
+            boton_guardar = st.form_submit_button("Actualizar Contraseña")
+
+            if boton_guardar:
+                if not correo_recup or not codigo_in or not nueva_clave:
+                    st.warning("Completa tu correo, el código y la nueva contraseña.")
+                elif nueva_clave != confirmar_clave:
+                    st.error("Las contraseñas no coinciden.")
+                else:
+                    with st.spinner("Validando código y actualizando..."):
+                        res = enviar_peticion_apps_script({
+                            "accion": "cambiar_password",
+                            "correo": correo_recup,
+                            "codigo": codigo_in,
+                            "nueva_password": nueva_clave
+                        })
+                        if res.get("status") == "ok":
+                            st.success("✅ Contraseña actualizada correctamente. Ya puedes iniciar sesión.")
+                            st.cache_data.clear()
+                        else:
+                            st.error(f"❌ {res.get('msg', 'Error al actualizar contraseña')}")
+
+# Detener ejecución si no está autenticado
 if not st.session_state.autenticado:
     login()
     st.stop()
 
 # ---------------------------------------------------------
-# BARRA LATERAL: PANEL DE GESTIÓN Y SINCRONIZACIÓN
+# FUNCIONES DEL MOTOR DE COBERTURAS Y CHAT
 # ---------------------------------------------------------
-with st.sidebar:
-    st.title("⚙️ Configuración")
-    st.markdown("Administra la base de pólizas sincronizadas desde Google Drive.")
+def cargar_polizas_disponibles():
+    """Detecta las carpetas de pólizas dentro del directorio CONDICIONES."""
+    polizas = {}
+    if os.path.exists(CARPETA_CONDICIONES):
+        for item in os.listdir(CARPETA_CONDICIONES):
+            ruta_item = os.path.join(CARPETA_CONDICIONES, item)
+            if os.path.isdir(ruta_item):
+                archivos = os.listdir(ruta_item)
+                archivos_txt = [a for a in archivos if a.endswith(".txt")]
+                if archivos_txt:
+                    polizas[item] = ruta_item
+    return polizas
+
+def leer_contenido_poliza(ruta_carpeta):
+    """
+    Lee los documentos de la póliza priorizando actualizacion.txt sobre el condicionado base.
+    """
+    textos = []
+    ruta_actualizacion = os.path.join(ruta_carpeta, "actualizacion.txt")
     
-    if st.button("🔄 Sincronizar / Actualizar Pólizas", use_container_width=True):
-        st.cache_data.clear()
-        st.cache_resource.clear()
-        if os.path.exists(CARPETA_CONDICIONES):
-            shutil.rmtree(CARPETA_CONDICIONES)
-        st.success("Caché limpiada. Descargando versiones actualizadas...")
-        st.rerun()
-
-    st.divider()
-    if st.button("Cerrar Sesión", use_container_width=True):
-        st.session_state.autenticado = False
-        st.rerun()
-
-# ---------------------------------------------------------
-# DESCARGA AUTOMÁTICA DE DOCUMENTOS DESDE GOOGLE DRIVE
-# ---------------------------------------------------------
-@st.cache_resource(show_spinner="📥 Sincronizando documentos de pólizas desde Google Drive...")
-def sincronizar_documentos():
-    os.makedirs(CARPETA_CONDICIONES, exist_ok=True)
-    elementos = os.listdir(CARPETA_CONDICIONES)
-    
-    # Sincroniza si la carpeta local está vacía
-    if not elementos:
-        url_drive = f"https://drive.google.com/drive/folders/{DRIVE_FOLDER_ID}"
-        gdown.download_folder(url_drive, output=CARPETA_CONDICIONES, quiet=True, use_cookies=False)
-        
-    return CARPETA_CONDICIONES
-
-sincronizar_documentos()
-
-# ---------------------------------------------------------
-# LECTURA Y PROCESAMIENTO CON PRIORIDAD DE ACTUALIZACIÓN
-# ---------------------------------------------------------
-def extraer_texto_archivo(ruta_archivo):
-    texto = ""
-    try:
-        ext = os.path.splitext(ruta_archivo)[1].lower()
-        if ext == ".docx":
-            doc = docx.Document(ruta_archivo)
-            texto = "\n".join([p.text for p in doc.paragraphs if p.text.strip()])
-        elif ext == ".pdf":
-            reader = pypdf.PdfReader(ruta_archivo)
-            paginas = [page.extract_text() for page in reader.pages if page.extract_text()]
-            texto = "\n".join(paginas)
-        elif ext == ".txt":
-            with open(ruta_archivo, "r", encoding="utf-8", errors="ignore") as f:
-                texto = f.read()
-    except Exception as e:
-        return f"[Error al leer {os.path.basename(ruta_archivo)}: {e}]"
-    return texto.strip()
-
-@st.cache_data(show_spinner="Indexando pólizas y condiciones...")
-def cargar_base_conocimiento():
-    documentos = {}
-    if not os.path.exists(CARPETA_CONDICIONES):
-        return documentos
-
-    for nombre in sorted(os.listdir(CARPETA_CONDICIONES)):
-        ruta = os.path.join(CARPETA_CONDICIONES, nombre)
-        if nombre.startswith((".", "~$")):
-            continue
-
-        # CASO 1: Carpeta por póliza (contiene base y/o actualizacion.txt)
-        if os.path.isdir(ruta):
-            archivos_carpeta = [
-                f for f in sorted(os.listdir(ruta)) 
-                if f.lower().endswith(('.pdf', '.docx', '.txt')) and not f.startswith((".", "~$"))
-            ]
-            if not archivos_carpeta:
-                continue
-
-            texto_actualizacion = ""
-            texto_base = []
-
-            for f in archivos_carpeta:
-                ruta_f = os.path.join(ruta, f)
-                contenido_f = extraer_texto_archivo(ruta_f)
-                if not contenido_f:
-                    continue
-
-                # Si es un archivo de actualización
-                if "actualiz" in f.lower() or "update" in f.lower():
-                    texto_actualizacion += (
-                        f"\n=====================================================\n"
-                        f"🚨 [ACTUALIZACIÓN VIGENTE - PRIORIDAD MÁXIMA] ({f})\n"
-                        f"=====================================================\n"
-                        f"{contenido_f}\n"
-                    )
-                else:
-                    texto_base.append(
-                        f"=====================================================\n"
-                        f"DOCUMENTO: {f}\n"
-                        f"=====================================================\n"
-                        f"{contenido_f}"
-                    )
-
-            # Ensamblar: La actualización va estrictamente al inicio
-            bloques_finales = []
-            if texto_actualizacion:
-                bloques_finales.append(texto_actualizacion)
-            if texto_base:
-                bloques_finales.append("\n\n".join(texto_base))
-
-            if bloques_finales:
-                documentos[nombre] = "\n\n".join(bloques_finales)
-
-        # CASO 2: Archivo suelto en raíz
-        elif os.path.isfile(ruta) and nombre.lower().endswith(('.pdf', '.docx', '.txt')):
-            contenido = extraer_texto_archivo(ruta)
-            if contenido:
-                documentos[nombre] = contenido
-
-    return documentos
-
-base_documentos = cargar_base_conocimiento()
-
-# ---------------------------------------------------------
-# GESTIÓN Y ROTACIÓN DE CLAVES DE GROQ (CON AUTO-SELECCIÓN)
-# ---------------------------------------------------------
-def obtener_claves_groq():
-    if "GROQ_API_KEYS" in st.secrets:
-        return [k.strip() for k in st.secrets["GROQ_API_KEYS"] if k.strip()]
-    elif "GROQ_API_KEY" in st.secrets:
-        return [st.secrets["GROQ_API_KEY"].strip()]
-    return []
-
-api_keys = obtener_claves_groq()
-
-if not api_keys:
-    st.error("⚠️ No se encontraron las claves de Groq en los Secrets de Streamlit. Agrégalas en Settings > Secrets.")
-    st.stop()
-
-def consultar_groq(prompt_sistema, consulta_usuario):
-    ultimo_error = ""
-
-    for current_key in api_keys:
+    # 1. Prioridad: Actualizaciones o cláusulas agregadas
+    if os.path.exists(ruta_actualizacion):
         try:
-            cliente = Groq(api_key=current_key.strip())
-            modelos_disponibles = [m.id for m in cliente.models.list().data]
+            with open(ruta_actualizacion, "r", encoding="utf-8", errors="ignore") as f:
+                textos.append("--- [DOCUMENTO PRIORITARIO: ACTUALIZACIÓN / CLÁUSULA MODIFICATORIA] ---\n" + f.read())
+        except Exception as e:
+            st.warning(f"Error leyendo actualización: {e}")
 
-            modelos_validos = [
-                m for m in modelos_disponibles
-                if "whisper" not in m.lower()
-                and "orpheus" not in m.lower()
-                and "vision" not in m.lower()
-                and "guard" not in m.lower()
-                and "1b" not in m.lower()
-            ]
+    # 2. Documentos base
+    for archivo in os.listdir(ruta_carpeta):
+        if archivo.endswith(".txt") and archivo.lower() != "actualizacion.txt":
+            ruta_completa = os.path.join(ruta_carpeta, archivo)
+            try:
+                with open(ruta_completa, "r", encoding="utf-8", errors="ignore") as f:
+                    textos.append(f"--- [CONDICIONADO BASE: {archivo}] ---\n" + f.read())
+            except Exception as e:
+                st.warning(f"Error leyendo {archivo}: {e}")
 
-            prioridades = [
-                "llama-3.3-70b-versatile",
-                "llama3-70b-8192",
-                "qwen-2.5-32b",
-                "mistral-saba-24b",
-                "llama-3.2-3b-preview"
-            ]
+    return "\n\n".join(textos)
 
-            modelo_a_usar = None
-            for cand in prioridades:
-                if cand in modelos_validos:
-                    modelo_a_usar = cand
-                    break
+def consultar_ia(contexto, pregunta):
+    """Envía la consulta a Llama 3 en Groq rotando API Keys."""
+    if not pool_keys:
+        return "Error: No hay claves API de Groq configuradas en st.secrets."
 
-            if not modelo_a_usar and modelos_validos:
-                modelo_a_usar = modelos_validos[0]
+    prompt_sistema = (
+        "Eres el asistente especializado en coberturas de salud y seguros de Care24. "
+        "Tu objetivo es responder de forma clara, directa y fundamentada a las dudas del asesor. "
+        "REGLA CRÍTICA: Si en el contexto existe una sección marcada como '[DOCUMENTO PRIORITARIO: ACTUALIZACIÓN]', "
+        "sus términos reemplazan o tienen precedencia absoluta sobre el condicionado base. "
+        "Si la respuesta no se encuentra en el texto proporcionado, indica amablemente que dicha información no figura en las pólizas analizadas."
+    )
 
-            if not modelo_a_usar:
-                raise Exception("No hay modelos de razonamiento disponibles en la cuenta.")
-
+    intentos = len(GROQ_KEYS)
+    for _ in range(intentos):
+        key = next(pool_keys)
+        try:
+            cliente = Groq(api_key=key)
             respuesta = cliente.chat.completions.create(
-                model=modelo_a_usar,
+                model="llama3-70b-8192",
                 messages=[
                     {"role": "system", "content": prompt_sistema},
-                    {"role": "user", "content": consulta_usuario}
+                    {"role": "user", "content": f"Contexto de la póliza:\n{contexto}\n\nPregunta del asesor:\n{pregunta}"}
                 ],
-                temperature=0.1,
-                max_tokens=1500
+                temperature=0.1
             )
             return respuesta.choices[0].message.content
-
-        except Exception as e:
-            ultimo_error = str(e)
+        except Exception:
             continue
-
-    return f"❌ Detalle técnico del error de Groq:\n\n`{ultimo_error}`"
+    return "Error: Todos los tokens de API de Groq alcanzaron su cuota de servicio o fallaron. Intenta nuevamente más tarde."
 
 # ---------------------------------------------------------
-# INTERFAZ SPLIT-VIEW (DOS COLUMNAS)
+# PANEL DE ADMINISTRADOR
 # ---------------------------------------------------------
-st.title("🛡️ Portal de Coberturas Care24")
-col_info, col_chat = st.columns([1, 1], gap="medium")
+def panel_administrador():
+    st.title("🛠️ Panel de Control - Administración Care24")
+    st.write("Gestiona el acceso y roles de los asesores en tiempo real.")
 
-# --- COLUMNA IZQUIERDA: VISOR DE COBERTURAS ---
-with col_info:
-    st.subheader("📋 Documentación de Pólizas")
-    doc_seleccionado = None
-    if not base_documentos:
-        st.warning("No se encontraron documentos en la carpeta sincronizada.")
-    else:
-        doc_seleccionado = st.selectbox(
-            "Selecciona una póliza para revisar:",
-            options=list(base_documentos.keys()),
-            key="selector_poliza"
-        )
-        if doc_seleccionado:
-            st.info(f"Póliza activa para consultas: **{doc_seleccionado}**")
-            with st.container(height=560):
-                st.text(base_documentos[doc_seleccionado])
+    df_u = obtener_base_usuarios()
+    if df_u.empty:
+        st.warning("No se pudo cargar la base de datos de usuarios.")
+        return
 
-# --- COLUMNA DERECHA: ASISTENTE INTELIGENTE CON IA ---
-with col_chat:
-    c_head1, c_head2 = st.columns([3, 1])
-    with c_head1:
-        st.subheader("💬 Consulta a la IA")
-    with c_head2:
-        if st.button("Limpiar chat"):
-            st.session_state.mensajes = []
+    # Visualización de usuarios activos e inactivos
+    columnas_vista = ["USUARIO", "NOMBRE_APELLIDO", "CORREO", "ROL", "ESTADO"]
+    st.dataframe(df_u[columnas_vista], use_container_width=True)
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("### Cambiar Estado de Acceso")
+        df_u["SELECTOR"] = df_u["NOMBRE_APELLIDO"] + " (" + df_u["USUARIO"] + ")"
+        seleccion = st.selectbox("Selecciona al asesor:", df_u["SELECTOR"].tolist())
+
+        fila_sel = df_u[df_u["SELECTOR"] == seleccion].iloc[0]
+        usuario_sel = fila_sel["USUARIO"]
+        estado_actual = fila_sel["ESTADO"]
+        
+        st.info(f"Estado registrado: **{estado_actual}**")
+        nuevo_estado = st.radio("Nuevo estado de cuenta:", ["ACTIVO", "INACTIVO"], horizontal=True)
+
+        if st.button("Guardar Estado de Acceso", use_container_width=True):
+            with st.spinner("Actualizando estado en base de datos..."):
+                res = enviar_peticion_apps_script({
+                    "accion": "modificar_estado",
+                    "usuario": usuario_sel,
+                    "nuevo_estado": nuevo_estado
+                })
+                if res.get("status") == "ok":
+                    st.success(f"Estado de {usuario_sel} cambiado a {nuevo_estado}.")
+                    st.cache_data.clear()
+                    st.rerun()
+                else:
+                    st.error("Error al actualizar estado.")
+
+    with col2:
+        st.markdown("### Registrar Nuevo Asesor")
+        nuevo_nombre = st.text_input("Nombre y Apellido:")
+        nuevo_user = st.text_input("Usuario (ej. juan.perez):").strip().lower()
+        nuevo_correo = st.text_input("Correo corporativo:").strip().lower()
+        nueva_clave = st.text_input("Contraseña temporal:", type="password").strip()
+        nuevo_rol = st.selectbox("Rol:", ["ASESOR", "ADMIN"])
+
+        if st.button("Crear Usuario", use_container_width=True):
+            if nuevo_nombre and nuevo_user and nuevo_correo and nueva_clave:
+                with st.spinner("Registrando nuevo asesor..."):
+                    res = enviar_peticion_apps_script({
+                        "accion": "crear_usuario",
+                        "usuario": nuevo_user,
+                        "nombre_apellido": nuevo_nombre,
+                        "correo": nuevo_correo,
+                        "password": nueva_clave,
+                        "rol": nuevo_rol
+                    })
+                    if res.get("status") == "ok":
+                        st.success(f"Asesor {nuevo_nombre} registrado correctamente.")
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error("Error al registrar nuevo usuario.")
+            else:
+                st.warning("Completa todos los campos obligatorios.")
+
+# ---------------------------------------------------------
+# INTERFAZ PRINCIPAL DE CONSULTA Y CHATBOT
+# ---------------------------------------------------------
+def app_principal():
+    sincronizar_documentos()
+    dict_polizas = cargar_polizas_disponibles()
+
+    # Barra lateral
+    with st.sidebar:
+        st.subheader("👤 Sesión Activa")
+        st.write(f"**Asesor:** {st.session_state.usuario_info.get('nombre')}")
+        st.write(f"**Rol:** {st.session_state.usuario_info.get('rol')}")
+
+        if st.session_state.usuario_info.get("rol") == "ADMIN":
+            st.divider()
+            st.subheader("⚙️ Navegación")
+            modo = st.radio("Selecciona vista:", ["Consulta de Coberturas", "Panel Administrador"])
+            if modo == "Panel Administrador":
+                st.session_state.modo_vista = "admin"
+            else:
+                st.session_state.modo_vista = "chat"
+
+        st.divider()
+        if st.button("🔄 Forzar Recarga de Documentos", use_container_width=True):
+            st.cache_data.clear()
+            if os.path.exists(CARPETA_CONDICIONES):
+                shutil.rmtree(CARPETA_CONDICIONES)
+            st.success("Carpetas limpias. Descargando versiones más recientes...")
             st.rerun()
 
-    if "mensajes" not in st.session_state:
-        st.session_state.mensajes = []
+        st.divider()
+        if st.button("🚪 Cerrar Sesión", use_container_width=True):
+            st.session_state.autenticado = False
+            st.session_state.usuario_info = {}
+            st.session_state.historial_chat = []
+            st.rerun()
 
-    # Entrada de pregunta
-    pregunta = st.chat_input("Escribe tu consulta sobre la póliza seleccionada...")
-    if pregunta:
-        st.session_state.mensajes.append({"role": "user", "content": pregunta})
+    # Despliegue de vistas
+    if st.session_state.modo_vista == "admin" and st.session_state.usuario_info.get("rol") == "ADMIN":
+        panel_administrador()
+    else:
+        st.title("🛡️ Care24 - Consulta de Coberturas")
+        st.caption("Asistente corporativo con inteligencia artificial para consulta inmediata de condicionados.")
 
-        # Cargar hasta 25,000 caracteres de la póliza activa
-        if doc_seleccionado and doc_seleccionado in base_documentos:
-            texto_poliza_activa = base_documentos[doc_seleccionado][:25000]
-            contexto_especifico = (
-                f"--- POLIZA ACTIVA: {doc_seleccionado} ---\n"
-                f"{texto_poliza_activa}\n"
-            )
-        else:
-            contexto_especifico = "No hay póliza seleccionada."
+        if not dict_polizas:
+            st.warning("No se encontraron carpetas de pólizas disponibles en el directorio local.")
+            return
 
-        prompt_sistema = (
-            "Eres el asistente especializado de Care24 para asesores de seguros. Tu tarea es responder con "
-            "rigor, precisión y claridad sobre las coberturas y exclusiones.\n\n"
-            f"INFORMACIÓN DE LA PÓLIZA SELECCIONADA:\n{contexto_especifico}\n\n"
-            "DIRECTIVAS ESTRICTAS DE RESPUESTA:\n"
-            "1. Responde basándote ÚNICAMENTE en la póliza activa proporcionada.\n"
-            "2. REGLA DE PREVALENCIA: Si existe una sección marcada como [ACTUALIZACIÓN VIGENTE - PRIORIDAD MÁXIMA], "
-            "esta sección ANULA Y SUSTITUYE cualquier dato en conflicto (copagos, exclusiones, límites) que figure en las condiciones base.\n"
-            "3. Responde de forma directa y profesional. Prohibido saludar o incluir despedidas.\n"
-            "4. Cuando te pregunten por servicios, copagos o eventos, entrega los datos organizados en una TABLA MARKDOWN "
-            "clara (| Servicio | Copago / Monto | Eventos / Límite | Detalle |).\n"
-            "5. Sé preciso con montos en Soles (S/.) o Dólares, límites anuales y restricciones.\n"
-            "6. Si un dato no figura explícitamente en el texto, indícalo claramente: 'El documento no especifica...' en vez de inventar."
+        poliza_seleccionada = st.selectbox(
+            "Selecciona la póliza o producto a consultar:",
+            options=list(dict_polizas.keys())
         )
 
-        with st.spinner(f"Analizando {doc_seleccionado}..."):
-            respuesta_ia = consultar_groq(prompt_sistema, pregunta)
-            st.session_state.mensajes.append({"role": "assistant", "content": respuesta_ia})
-        st.rerun()
+        col_doc, col_chat = st.columns([1, 1], gap="medium")
 
-    # Agrupar mensajes en pares (pregunta + respuesta)
-    pares_conversacion = []
-    lista = st.session_state.mensajes
-    i = 0
-    while i < len(lista):
-        if i + 1 < len(lista) and lista[i]["role"] == "user" and lista[i+1]["role"] == "assistant":
-            pares_conversacion.append((lista[i], lista[i+1]))
-            i += 2
-        else:
-            pares_conversacion.append((lista[i], None))
-            i += 1
+        # Visualizador de texto de póliza
+        with col_doc:
+            st.markdown("### 📄 Contenido del Condicionado")
+            ruta_poliza = dict_polizas[poliza_seleccionada]
+            contenido_completo = leer_contenido_poliza(ruta_poliza)
+            st.text_area("Texto consolidado (Base + Actualizaciones):", contenido_completo, height=520)
 
-    # Renderizar pares ordenados de más reciente a más antiguo
-    for user_msg, bot_msg in reversed(pares_conversacion):
-        with st.chat_message(user_msg["role"]):
-            st.markdown(user_msg["content"])
-        if bot_msg:
-            with st.chat_message(bot_msg["role"]):
-                st.markdown(bot_msg["content"])
-        st.divider()
+        # Chatbot con IA
+        with col_chat:
+            st.markdown("### 💬 Asistente IA")
+
+            for msj in st.session_state.historial_chat:
+                with st.chat_message(msj["role"]):
+                    st.write(msj["content"])
+
+            if prompt_usuario := st.chat_input("Escribe tu consulta sobre la póliza..."):
+                st.session_state.historial_chat.append({"role": "user", "content": prompt_usuario})
+                with st.chat_message("user"):
+                    st.write(prompt_usuario)
+
+                with st.chat_message("assistant"):
+                    with st.spinner("Analizando condicionado y cláusulas prioritarias..."):
+                        respuesta_ia = consultar_ia(contenido_completo, prompt_usuario)
+                        st.write(respuesta_ia)
+                        st.session_state.historial_chat.append({"role": "assistant", "content": respuesta_ia})
+
+# Ejecución de la aplicación
+app_principal()
