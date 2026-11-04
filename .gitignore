@@ -1,0 +1,13 @@
+﻿# Pólizas y archivos locales (se manejan en Drive)
+CONDICIONES/
+TXT_UNIFICADO/
+
+# Python y caché
+__pycache__/
+*.pyc
+.env
+venv/
+env/
+
+# Credenciales locales
+.streamlit/secrets.toml
