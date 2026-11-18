@@ -223,9 +223,12 @@ def leer_contenido_poliza(ruta_carpeta):
     return "\n\n".join(textos)
 
 def consultar_ia(contexto, pregunta):
-    """Envía la consulta a Llama 3 en Groq rotando API Keys."""
+    """Envía la consulta a Llama 3.3 en Groq rotando API Keys y modelos."""
     if not pool_keys:
         return "Error: No hay claves API de Groq configuradas en st.secrets."
+
+    # Limitar contexto a ~24,000 caracteres (~6,000 tokens) para no exceder límite TPM gratuito
+    contexto_seguro = contexto[:24000]
 
     prompt_sistema = (
         "Eres el asistente especializado en coberturas de salud y seguros de Care24. "
@@ -235,23 +238,29 @@ def consultar_ia(contexto, pregunta):
         "Si la respuesta no se encuentra en el texto proporcionado, indica amablemente que dicha información no figura en las pólizas analizadas."
     )
 
+    modelos_disponibles = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+    ultimo_error = ""
+
     intentos = len(GROQ_KEYS)
     for _ in range(intentos):
         key = next(pool_keys)
-        try:
-            cliente = Groq(api_key=key)
-            respuesta = cliente.chat.completions.create(
-                model="llama3-70b-8192",
-                messages=[
-                    {"role": "system", "content": prompt_sistema},
-                    {"role": "user", "content": f"Contexto de la póliza:\n{contexto}\n\nPregunta del asesor:\n{pregunta}"}
-                ],
-                temperature=0.1
-            )
-            return respuesta.choices[0].message.content
-        except Exception:
-            continue
-    return "Error: Todos los tokens de API de Groq alcanzaron su cuota de servicio o fallaron. Intenta nuevamente más tarde."
+        cliente = Groq(api_key=key)
+        for modelo in modelos_disponibles:
+            try:
+                respuesta = cliente.chat.completions.create(
+                    model=modelo,
+                    messages=[
+                        {"role": "system", "content": prompt_sistema},
+                        {"role": "user", "content": f"Contexto de la póliza:\n{contexto_seguro}\n\nPregunta del asesor:\n{pregunta}"}
+                    ],
+                    temperature=0.1
+                )
+                return respuesta.choices[0].message.content
+            except Exception as e:
+                ultimo_error = str(e)
+                continue
+
+    return f"❌ No se pudo procesar la consulta en Groq. Detalle técnico: {ultimo_error}"
 
 # ---------------------------------------------------------
 # PANEL DE ADMINISTRADOR
