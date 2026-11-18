@@ -223,7 +223,7 @@ def leer_contenido_poliza(ruta_carpeta):
     return "\n\n".join(textos)
 
 def consultar_ia(contexto, pregunta):
-    """Consulta modelos activos directamente desde la cuenta de Groq y responde."""
+    """Consulta modelos de texto activos en Groq filtrando modelos de audio o términos especiales."""
     if not pool_keys:
         return "Error: No hay claves API de Groq configuradas en st.secrets."
 
@@ -245,19 +245,27 @@ def consultar_ia(contexto, pregunta):
         key = next(pool_keys)
         cliente = Groq(api_key=key)
         try:
-            # Obtener dinámicamente los modelos activos de tu cuenta en Groq
             lista_modelos = cliente.models.list().data
+            # Filtrar EXCLUSIVAMENTE modelos de chat de texto estándar
+            palabras_permitidas = ("llama", "qwen", "mixtral", "gemma")
+            palabras_excluidas = ("whisper", "guard", "tts", "orpheus", "vision", "audio", "prompt")
+
             ids_activos = [
-                m.id for m in lista_modelos 
-                if "whisper" not in m.id.lower() and "guard" not in m.id.lower() and "tts" not in m.id.lower()
+                m.id for m in lista_modelos
+                if any(p in m.id.lower() for p in palabras_permitidas)
+                and not any(e in m.id.lower() for e in palabras_excluidas)
             ]
-            # Priorizar modelos Llama 3 / 4 o Qwen disponibles
-            ids_activos.sort(key=lambda x: (0 if "70b" in x else (1 if "llama" in x else 2), x))
+
+            # Ordenar priorizando modelos de 70B o 32B (mayor razonamiento) y luego los rápidos (8B/instant)
+            ids_activos.sort(key=lambda x: (
+                0 if "70b" in x.lower() else (1 if "32b" in x.lower() or "versatile" in x.lower() else 2),
+                x
+            ))
         except Exception as e:
             ultimo_error = f"Error validando clave API: {e}"
             continue
 
-        for modelo in ids_activos[:3]:  # Probar hasta los 3 mejores modelos activos
+        for modelo in ids_activos[:4]:
             try:
                 respuesta = cliente.chat.completions.create(
                     model=modelo,
