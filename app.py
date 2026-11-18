@@ -223,12 +223,12 @@ def leer_contenido_poliza(ruta_carpeta):
     return "\n\n".join(textos)
 
 def consultar_ia(contexto, pregunta):
-    """Envía la consulta a Llama 3.3 en Groq rotando API Keys y modelos."""
+    """Consulta modelos activos directamente desde la cuenta de Groq y responde."""
     if not pool_keys:
         return "Error: No hay claves API de Groq configuradas en st.secrets."
 
-    # Limitar contexto a ~24,000 caracteres (~6,000 tokens) para no exceder límite TPM gratuito
-    contexto_seguro = contexto[:24000]
+    # Recorte seguro (~4,500 tokens) para respetar el límite TPM gratuito de Groq
+    contexto_seguro = contexto[:18000]
 
     prompt_sistema = (
         "Eres el asistente especializado en coberturas de salud y seguros de Care24. "
@@ -238,14 +238,26 @@ def consultar_ia(contexto, pregunta):
         "Si la respuesta no se encuentra en el texto proporcionado, indica amablemente que dicha información no figura en las pólizas analizadas."
     )
 
-    modelos_disponibles = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
     ultimo_error = ""
-
     intentos = len(GROQ_KEYS)
+
     for _ in range(intentos):
         key = next(pool_keys)
         cliente = Groq(api_key=key)
-        for modelo in modelos_disponibles:
+        try:
+            # Obtener dinámicamente los modelos activos de tu cuenta en Groq
+            lista_modelos = cliente.models.list().data
+            ids_activos = [
+                m.id for m in lista_modelos 
+                if "whisper" not in m.id.lower() and "guard" not in m.id.lower() and "tts" not in m.id.lower()
+            ]
+            # Priorizar modelos Llama 3 / 4 o Qwen disponibles
+            ids_activos.sort(key=lambda x: (0 if "70b" in x else (1 if "llama" in x else 2), x))
+        except Exception as e:
+            ultimo_error = f"Error validando clave API: {e}"
+            continue
+
+        for modelo in ids_activos[:3]:  # Probar hasta los 3 mejores modelos activos
             try:
                 respuesta = cliente.chat.completions.create(
                     model=modelo,
@@ -257,7 +269,7 @@ def consultar_ia(contexto, pregunta):
                 )
                 return respuesta.choices[0].message.content
             except Exception as e:
-                ultimo_error = str(e)
+                ultimo_error = f"[{modelo}] {e}"
                 continue
 
     return f"❌ No se pudo procesar la consulta en Groq. Detalle técnico: {ultimo_error}"
