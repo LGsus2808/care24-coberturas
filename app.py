@@ -1,6 +1,6 @@
 ﻿import os
 import shutil
-import json
+import base64
 import itertools
 import requests
 import pandas as pd
@@ -26,7 +26,6 @@ APPS_SCRIPT_URL = st.secrets.get("APPS_SCRIPT_URL", "")
 USUARIOS_SHEET_ID = st.secrets.get("USUARIOS_SHEET_ID", "")
 URL_SHEET_CSV = f"https://docs.google.com/spreadsheets/d/{USUARIOS_SHEET_ID}/export?format=csv"
 
-# Configuración de pool de claves Groq
 GROQ_KEYS = st.secrets.get("GROQ_API_KEYS", [])
 if isinstance(GROQ_KEYS, str):
     GROQ_KEYS = [GROQ_KEYS]
@@ -174,79 +173,199 @@ def login():
                         else:
                             st.error(f"❌ {res.get('msg', 'Error al actualizar contraseña')}")
 
-# Detener ejecución si no está autenticado
 if not st.session_state.autenticado:
     login()
     st.stop()
 
 # ---------------------------------------------------------
-# FUNCIONES DEL MOTOR DE COBERTURAS Y CHAT
+# EXTRACCIÓN DE IMÁGENES CON GROQ VISION (CACHEADO)
+# ---------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def transcribir_imagen_con_groq(ruta_imagen, mod_time):
+    """
+    Usa un modelo Vision activo de Groq para leer tablas y textos de imágenes.
+    Se cachea por fecha de modificación (mod_time) para no gastar tokens repetidamente.
+    """
+    if not pool_keys:
+        return "[Imagen no procesada: sin claves API]"
+
+    ext = os.path.splitext(ruta_imagen)[1].lower().replace(".", "")
+    if ext == "jpg":
+        ext = "jpeg"
+
+    try:
+        with open(ruta_imagen, "rb") as img_file:
+            base64_img = base64.b64encode(img_file.read()).decode("utf-8")
+    except Exception as e:
+        return f"[Error abriendo imagen {os.path.basename(ruta_imagen)}: {e}]"
+
+    prompt_vision = (
+        "Transcribe con total precisión y fidelidad todos los textos, números, montos, "
+        "porcentajes, deducibles, copagos y tablas que aparecen en esta imagen de una póliza de seguros. "
+        "Si hay tablas, estructúralas claramente en formato Markdown. No inventes ni omitas ningún dato."
+    )
+
+    for _ in range(len(GROQ_KEYS)):
+        key = next(pool_keys)
+        cliente = Groq(api_key=key)
+        try:
+            modelos = cliente.models.list().data
+            modelos_vision = [
+                m.id for m in modelos
+                if "vision" in m.id.lower() or "scout" in m.id.lower() or "maverick" in m.id.lower()
+            ]
+            if not modelos_vision:
+                modelos_vision = ["meta-llama/llama-4-scout-17b-16e-instruct", "llama-3.2-90b-vision-preview"]
+
+            for mod_v in modelos_vision[:2]:
+                try:
+                    resp = cliente.chat.completions.create(
+                        model=mod_v,
+                        messages=[
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt_vision},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": f"data:image/{ext};base64,{base64_img}"}
+                                    }
+                                ]
+                            }
+                        ],
+                        temperature=0.0
+                    )
+                    return resp.choices[0].message.content
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+    return f"[Aviso: No se pudo extraer texto visual de {os.path.basename(ruta_imagen)}]"
+
+# ---------------------------------------------------------
+# DETECCIÓN Y LECTURA JERÁRQUICA DE PÓLIZAS
 # ---------------------------------------------------------
 def cargar_polizas_disponibles():
-    """Detecta las carpetas de pólizas dentro del directorio CONDICIONES."""
+    """Detecta las carpetas de pólizas que contienen al menos un TXT o carpeta ACTUALIZACION."""
     polizas = {}
+    extensiones_img = (".png", ".jpg", ".jpeg", ".webp")
     if os.path.exists(CARPETA_CONDICIONES):
-        for item in os.listdir(CARPETA_CONDICIONES):
+        for item in sorted(os.listdir(CARPETA_CONDICIONES)):
             ruta_item = os.path.join(CARPETA_CONDICIONES, item)
             if os.path.isdir(ruta_item):
-                archivos = os.listdir(ruta_item)
-                archivos_txt = [a for a in archivos if a.endswith(".txt")]
-                if archivos_txt:
+                tiene_contenido = False
+                for root_dir, _, files in os.walk(ruta_item):
+                    if any(f.lower().endswith(".txt") or f.lower().endswith(extensiones_img) for f in files):
+                        tiene_contenido = True
+                        break
+                if tiene_contenido:
                     polizas[item] = ruta_item
     return polizas
 
 def leer_contenido_poliza(ruta_carpeta):
     """
-    Lee los documentos de la póliza priorizando actualizacion.txt sobre el condicionado base.
+    Lee primero la carpeta ACTUALIZACION (TXT + Imágenes) y luego el condicionado base
+    (TXT + imagenes_revision), marcando la prioridad absoluta de vigencia.
     """
-    textos = []
-    ruta_actualizacion = os.path.join(ruta_carpeta, "actualizacion.txt")
-    
-    # 1. Prioridad: Actualizaciones o cláusulas agregadas
-    if os.path.exists(ruta_actualizacion):
-        try:
-            with open(ruta_actualizacion, "r", encoding="utf-8", errors="ignore") as f:
-                textos.append("--- [DOCUMENTO PRIORITARIO: ACTUALIZACIÓN / CLÁUSULA MODIFICATORIA] ---\n" + f.read())
-        except Exception as e:
-            st.warning(f"Error leyendo actualización: {e}")
+    bloque_actualizacion = []
+    bloque_base = []
+    extensiones_img = (".png", ".jpg", ".jpeg", ".webp")
 
-    # 2. Documentos base
-    for archivo in os.listdir(ruta_carpeta):
-        if archivo.endswith(".txt") and archivo.lower() != "actualizacion.txt":
-            ruta_completa = os.path.join(ruta_carpeta, archivo)
-            try:
-                with open(ruta_completa, "r", encoding="utf-8", errors="ignore") as f:
-                    textos.append(f"--- [CONDICIONADO BASE: {archivo}] ---\n" + f.read())
-            except Exception as e:
-                st.warning(f"Error leyendo {archivo}: {e}")
+    # 1. PRIORIDAD MÁXIMA: Carpeta ACTUALIZACION
+    for nombre_sub in sorted(os.listdir(ruta_carpeta)):
+        ruta_sub = os.path.join(ruta_carpeta, nombre_sub)
+        if os.path.isdir(ruta_sub) and nombre_sub.strip().upper() == "ACTUALIZACION":
+            for archivo in sorted(os.listdir(ruta_sub)):
+                ruta_arch = os.path.join(ruta_sub, archivo)
+                if not os.path.isfile(ruta_arch):
+                    continue
 
-    return "\n\n".join(textos)
+                if archivo.lower().endswith(".txt"):
+                    with open(ruta_arch, "r", encoding="utf-8", errors="ignore") as f:
+                        bloque_actualizacion.append(
+                            f"=== [ACTUALIZACIÓN VIGENTE - ARCHIVO: {archivo}] ===\n{f.read().strip()}"
+                        )
+                elif archivo.lower().endswith(extensiones_img):
+                    mod_time = os.path.getmtime(ruta_arch)
+                    texto_img = transcribir_imagen_con_groq(ruta_arch, mod_time)
+                    bloque_actualizacion.append(
+                        f"=== [ACTUALIZACIÓN VIGENTE - IMAGEN/TABLA: {archivo}] ===\n{texto_img}"
+                    )
 
+    # 2. CONDICIONADO GENERAL BASE (TXT en la raíz de la póliza)
+    for archivo in sorted(os.listdir(ruta_carpeta)):
+        ruta_arch = os.path.join(ruta_carpeta, archivo)
+        if os.path.isfile(ruta_arch) and archivo.lower().endswith(".txt"):
+            if archivo.lower() == "actualizacion.txt":
+                with open(ruta_arch, "r", encoding="utf-8", errors="ignore") as f:
+                    bloque_actualizacion.append(
+                        f"=== [ACTUALIZACIÓN VIGENTE - {archivo}] ===\n{f.read().strip()}"
+                    )
+            else:
+                with open(ruta_arch, "r", encoding="utf-8", errors="ignore") as f:
+                    bloque_base.append(
+                        f"--- [CONDICIONADO GENERAL BASE: {archivo}] ---\n{f.read().strip()}"
+                    )
+
+    # 3. TABLAS DEL CONDICIONADO BASE (Carpeta imagenes_revision)
+    ruta_imgs_rev = os.path.join(ruta_carpeta, "imagenes_revision")
+    if os.path.isdir(ruta_imgs_rev):
+        for archivo in sorted(os.listdir(ruta_imgs_rev)):
+            ruta_arch = os.path.join(ruta_imgs_rev, archivo)
+            if os.path.isfile(ruta_arch) and archivo.lower().endswith(extensiones_img):
+                mod_time = os.path.getmtime(ruta_arch)
+                texto_img = transcribir_imagen_con_groq(ruta_arch, mod_time)
+                bloque_base.append(
+                    f"--- [TABLA DEL CONDICIONADO BASE ({archivo})] ---\n{texto_img}"
+                )
+
+    resultado = []
+    if bloque_actualizacion:
+        resultado.append(
+            "******************************************************************\n"
+            "SECCIÓN 1: DATA ACTUALIZADA (MÁXIMA PRIORIDAD Y VIGENCIA ACTUAL)\n"
+            "******************************************************************\n" +
+            "\n\n".join(bloque_actualizacion)
+        )
+    if bloque_base:
+        resultado.append(
+            "******************************************************************\n"
+            "SECCIÓN 2: CONDICIONADO GENERAL BASE (APLICAR SOLO SI NO FUE MODIFICADO ARRIBA)\n"
+            "******************************************************************\n" +
+            "\n\n".join(bloque_base)
+        )
+
+    return "\n\n".join(resultado)
+
+# ---------------------------------------------------------
+# MOTOR DE CONSULTA CON JERARQUÍA Y FILTRO DE MODELOS GROQ
+# ---------------------------------------------------------
 def consultar_ia(contexto, pregunta):
-    """Consulta modelos de texto activos en Groq filtrando modelos de audio o términos especiales."""
+    """Consulta modelos de texto activos en Groq aplicando jerarquía estricta de actualización."""
     if not pool_keys:
         return "Error: No hay claves API de Groq configuradas en st.secrets."
 
-    # Recorte seguro (~4,500 tokens) para respetar el límite TPM gratuito de Groq
+    # Recorte seguro (~4,500 tokens) garantizando que SECCIÓN 1 (ACTUALIZACIÓN) entre siempre primero
     contexto_seguro = contexto[:18000]
 
     prompt_sistema = (
         "Eres el asistente especializado en coberturas de salud y seguros de Care24. "
-        "Tu objetivo es responder de forma clara, directa y fundamentada a las dudas del asesor. "
-        "REGLA CRÍTICA: Si en el contexto existe una sección marcada como '[DOCUMENTO PRIORITARIO: ACTUALIZACIÓN]', "
-        "sus términos reemplazan o tienen precedencia absoluta sobre el condicionado base. "
-        "Si la respuesta no se encuentra en el texto proporcionado, indica amablemente que dicha información no figura en las pólizas analizadas."
+        "Responde de forma clara, directa y fundamentada a las dudas del asesor.\n\n"
+        "REGLA SUPREMA DE VIGENCIA Y JERARQUÍA:\n"
+        "1. El contexto está dividido en 'SECCIÓN 1: DATA ACTUALIZADA' y 'SECCIÓN 2: CONDICIONADO GENERAL BASE'.\n"
+        "2. Si existe cualquier contradicción entre ambas secciones (por ejemplo, precios, copagos, deducibles, "
+        "topes de edad o condiciones de acceso), la 'SECCIÓN 1: DATA ACTUALIZADA' SIEMPRE tiene la verdad absoluta y anula lo que diga la SECCIÓN 2.\n"
+        "3. Menciona brevemente si el dato proviene de la actualización vigente cuando aplique.\n"
+        "4. Si el dato consultado no aparece en ninguna sección, indícalo claramente sin inventar."
     )
 
     ultimo_error = ""
-    intentos = len(GROQ_KEYS)
-
-    for _ in range(intentos):
+    for _ in range(len(GROQ_KEYS)):
         key = next(pool_keys)
         cliente = Groq(api_key=key)
         try:
             lista_modelos = cliente.models.list().data
-            # Filtrar EXCLUSIVAMENTE modelos de chat de texto estándar
             palabras_permitidas = ("llama", "qwen", "mixtral", "gemma")
             palabras_excluidas = ("whisper", "guard", "tts", "orpheus", "vision", "audio", "prompt")
 
@@ -255,8 +374,6 @@ def consultar_ia(contexto, pregunta):
                 if any(p in m.id.lower() for p in palabras_permitidas)
                 and not any(e in m.id.lower() for e in palabras_excluidas)
             ]
-
-            # Ordenar priorizando modelos de 70B o 32B (mayor razonamiento) y luego los rápidos (8B/instant)
             ids_activos.sort(key=lambda x: (
                 0 if "70b" in x.lower() else (1 if "32b" in x.lower() or "versatile" in x.lower() else 2),
                 x
@@ -271,9 +388,9 @@ def consultar_ia(contexto, pregunta):
                     model=modelo,
                     messages=[
                         {"role": "system", "content": prompt_sistema},
-                        {"role": "user", "content": f"Contexto de la póliza:\n{contexto_seguro}\n\nPregunta del asesor:\n{pregunta}"}
+                        {"role": "user", "content": f"Documentación de la póliza:\n{contexto_seguro}\n\nPregunta del asesor:\n{pregunta}"}
                     ],
-                    temperature=0.1
+                    temperature=0.0
                 )
                 return respuesta.choices[0].message.content
             except Exception as e:
@@ -294,7 +411,6 @@ def panel_administrador():
         st.warning("No se pudo cargar la base de datos de usuarios.")
         return
 
-    # Visualización de usuarios activos e inactivos
     columnas_vista = ["USUARIO", "NOMBRE_APELLIDO", "CORREO", "ROL", "ESTADO"]
     st.dataframe(df_u[columnas_vista], use_container_width=True)
 
@@ -361,7 +477,6 @@ def app_principal():
     sincronizar_documentos()
     dict_polizas = cargar_polizas_disponibles()
 
-    # Barra lateral
     with st.sidebar:
         st.subheader("👤 Sesión Activa")
         st.write(f"**Asesor:** {st.session_state.usuario_info.get('nombre')}")
@@ -391,12 +506,11 @@ def app_principal():
             st.session_state.historial_chat = []
             st.rerun()
 
-    # Despliegue de vistas
     if st.session_state.modo_vista == "admin" and st.session_state.usuario_info.get("rol") == "ADMIN":
         panel_administrador()
     else:
         st.title("🛡️ Care24 - Consulta de Coberturas")
-        st.caption("Asistente corporativo con inteligencia artificial para consulta inmediata de condicionados.")
+        st.caption("Asistente corporativo con inteligencia artificial para consulta inmediata de condicionados y actualizaciones.")
 
         if not dict_polizas:
             st.warning("No se encontraron carpetas de pólizas disponibles en el directorio local.")
@@ -409,14 +523,13 @@ def app_principal():
 
         col_doc, col_chat = st.columns([1, 1], gap="medium")
 
-        # Visualizador de texto de póliza
         with col_doc:
-            st.markdown("### 📄 Contenido del Condicionado")
+            st.markdown("### 📄 Contenido Consolidado")
             ruta_poliza = dict_polizas[poliza_seleccionada]
-            contenido_completo = leer_contenido_poliza(ruta_poliza)
-            st.text_area("Texto consolidado (Base + Actualizaciones):", contenido_completo, height=520)
+            with st.spinner("Consolidando texto y transcribiendo tablas visuales..."):
+                contenido_completo = leer_contenido_poliza(ruta_poliza)
+            st.text_area("Vista previa (Sección 1: Actualizaciones > Sección 2: Base):", contenido_completo, height=520)
 
-        # Chatbot con IA
         with col_chat:
             st.markdown("### 💬 Asistente IA")
 
@@ -430,10 +543,9 @@ def app_principal():
                     st.write(prompt_usuario)
 
                 with st.chat_message("assistant"):
-                    with st.spinner("Analizando condicionado y cláusulas prioritarias..."):
+                    with st.spinner("Analizando actualizaciones vigentes y condicionado..."):
                         respuesta_ia = consultar_ia(contenido_completo, prompt_usuario)
                         st.write(respuesta_ia)
                         st.session_state.historial_chat.append({"role": "assistant", "content": respuesta_ia})
 
-# Ejecución de la aplicación
 app_principal()
